@@ -248,17 +248,3 @@ Use `init-runner` to add runner environment monitoring alongside the audit step.
 ## License
 
 GPLv2. See [LICENSE](LICENSE).
-
----
-
-## Portfolio
-
-Part of a defensive-security CLI toolchain built in Python 3.12:
-
-| Tool | Domain |
-|---|---|
-| [pwnkit](https://github.com/TheVoidThatConsumes/pwnkit) | Password hashing, breach checking, crack-resistance testing |
-| [xbom](https://github.com/TheVoidThatConsumes/xbom) | Dependency auditing, CVE scanning, CycloneDX/SPDX SBOM generation |
-| [SuReader](https://github.com/TheVoidThatConsumes/SuReader) | Suricata EVE JSON log analysis and alert triage |
-| [tokenwatch](https://github.com/TheVoidThatConsumes/tokenwatch) | Secret scanning with regex + entropy scoring, git history support |
-| **pipewatch** | CI/CD pipeline integrity monitoring |
