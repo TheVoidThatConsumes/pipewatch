@@ -312,7 +312,7 @@ def _get_triggers(doc: dict) -> dict:
 def _check_pr_target_misuse(docs: dict[str, dict]) -> list[dict]:
     """Flag pull_request_target workflows that check out and execute PR head code."""
     findings = []
-    checkout_re = re.compile(r"actions/checkout(@.*)?")
+    checkout_re = re.compile(r"actions/checkout(@.*)?$")
     pr_head_re = re.compile(r"github\.event\.pull_request\.head|github\.head_ref", re.IGNORECASE)
     for path, doc in docs.items():
         if "pull_request_target" not in _get_triggers(doc):
@@ -425,9 +425,10 @@ def _check_self_hosted(docs: dict[str, dict]) -> list[dict]:
             is_self_hosted = False
             if isinstance(runs_on, list):
                 is_self_hosted = "self-hosted" in runs_on or any(
-                    not _GH_HOSTED.match(str(r)) for r in runs_on if isinstance(r, str)
+                    not _GH_HOSTED.match(str(r)) for r in runs_on
+                    if isinstance(r, str) and not str(r).startswith("${{")
                 )
-            elif isinstance(runs_on, str) and runs_on:
+            elif isinstance(runs_on, str) and runs_on and not runs_on.startswith("${{"):
                 is_self_hosted = not _GH_HOSTED.match(runs_on)
             if is_self_hosted:
                 findings.append(_finding(
@@ -462,11 +463,16 @@ def _check_workflow_run_chains(docs: dict[str, dict]) -> list[dict]:
         triggered_by = wr_config.get("workflows", []) if isinstance(wr_config, dict) else []
 
         top_perms = doc.get("permissions")
-        has_write = (
-            top_perms == "write-all"
-            or (isinstance(top_perms, dict)
-                and any(v in ("write", "admin") for v in top_perms.values()))
-        )
+        job_perms = [
+            job_def.get("permissions")
+            for job_def in (doc.get("jobs") or {}).values()
+            if isinstance(job_def, dict) and job_def.get("permissions")
+        ]
+        def _is_write(p) -> bool:
+            return p == "write-all" or (
+                isinstance(p, dict) and any(v in ("write", "admin") for v in p.values())
+            )
+        has_write = _is_write(top_perms) or any(_is_write(p) for p in job_perms)
 
         for source_name in triggered_by:
             source_triggers = name_to_triggers.get(source_name, set())
