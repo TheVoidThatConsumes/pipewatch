@@ -1,7 +1,5 @@
 """
-pipewatch v0.2.0 — CI/CD pipeline integrity monitor
-
-Watches the thing that builds your software.
+pipewatch v0.2.0 — Integrity monitoring and static analysis for CI/CD pipelines
 
 Usage:
   pipewatch baseline          # record HEAD as known-good
