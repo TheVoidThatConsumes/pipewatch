@@ -1,6 +1,7 @@
 """
 pipewatch v0.2.0 — Integrity monitoring and static analysis for CI/CD pipelines
 
+
 Usage:
   pipewatch baseline          # record HEAD as known-good
   pipewatch scan              # file diff + step fingerprints vs baseline
@@ -149,7 +150,7 @@ def diff_pipeline_files(repo: Path, baseline: str) -> list[FileDiff]:
     results = []
     for fpath in find_pipeline_files(repo):
         rel = str(fpath.relative_to(repo))
-        current = fpath.read_text(encoding="utf-8")
+        current = fpath.read_text(encoding="utf-8", errors="replace")
         base = git_show(repo, baseline, rel)
         if base is None:
             results.append(FileDiff(rel, "added", list(difflib.unified_diff(
@@ -260,7 +261,7 @@ def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
     changes = []
     for fpath in find_pipeline_files(repo):
         rel = str(fpath.relative_to(repo))
-        current_content = fpath.read_text(encoding="utf-8")
+        current_content = fpath.read_text(encoding="utf-8", errors="replace")
         base_content = git_show(repo, baseline, rel)
         cur = _fps_for_file(fpath, rel, current_content)
         bas = _fps_for_file(fpath, rel, base_content) if base_content else {}
@@ -289,7 +290,7 @@ def _load_workflow_docs(repo: Path) -> dict[str, dict]:
         if rel in docs:
             continue
         try:
-            doc = yaml.safe_load(fpath.read_text(encoding="utf-8"))
+            doc = yaml.safe_load(fpath.read_text(encoding="utf-8", errors="replace"))
             if isinstance(doc, dict):
                 docs[rel] = doc
         except (yaml.YAMLError, OSError):
@@ -310,7 +311,7 @@ def _get_triggers(doc: dict) -> dict:
 def _check_pr_target_misuse(docs: dict[str, dict]) -> list[dict]:
     """Flag pull_request_target workflows that check out and execute PR head code."""
     findings = []
-    checkout_re = re.compile(r"actions/checkout(@.*)?$")
+    checkout_re = re.compile(r"actions/checkout(@.*)?")
     pr_head_re = re.compile(r"github\.event\.pull_request\.head|github\.head_ref", re.IGNORECASE)
     for path, doc in docs.items():
         if "pull_request_target" not in _get_triggers(doc):
@@ -423,10 +424,9 @@ def _check_self_hosted(docs: dict[str, dict]) -> list[dict]:
             is_self_hosted = False
             if isinstance(runs_on, list):
                 is_self_hosted = "self-hosted" in runs_on or any(
-                    not _GH_HOSTED.match(str(r)) for r in runs_on
-                    if isinstance(r, str) and not str(r).startswith("${{")
+                    not _GH_HOSTED.match(str(r)) for r in runs_on if isinstance(r, str)
                 )
-            elif isinstance(runs_on, str) and runs_on and not runs_on.startswith("${{"):
+            elif isinstance(runs_on, str) and runs_on:
                 is_self_hosted = not _GH_HOSTED.match(runs_on)
             if is_self_hosted:
                 findings.append(_finding(
@@ -461,16 +461,11 @@ def _check_workflow_run_chains(docs: dict[str, dict]) -> list[dict]:
         triggered_by = wr_config.get("workflows", []) if isinstance(wr_config, dict) else []
 
         top_perms = doc.get("permissions")
-        job_perms = [
-            job_def.get("permissions")
-            for job_def in (doc.get("jobs") or {}).values()
-            if isinstance(job_def, dict) and job_def.get("permissions")
-        ]
-        def _is_write(p) -> bool:
-            return p == "write-all" or (
-                isinstance(p, dict) and any(v in ("write", "admin") for v in p.values())
-            )
-        has_write = _is_write(top_perms) or any(_is_write(p) for p in job_perms)
+        has_write = (
+            top_perms == "write-all"
+            or (isinstance(top_perms, dict)
+                and any(v in ("write", "admin") for v in top_perms.values()))
+        )
 
         for source_name in triggered_by:
             source_triggers = name_to_triggers.get(source_name, set())
@@ -526,7 +521,7 @@ def audit_pinning(repo: Path) -> list[PinningFinding]:
             continue
         rel = str(fpath.relative_to(repo))
         try:
-            doc = yaml.safe_load(fpath.read_text(encoding="utf-8"))
+            doc = yaml.safe_load(fpath.read_text(encoding="utf-8", errors="replace"))
         except (yaml.YAMLError, OSError):
             continue
         if not isinstance(doc, dict):
@@ -581,7 +576,7 @@ def verify_pinned_shas(repo: Path, token: Optional[str] = None) -> list[dict]:
         if fpath.suffix not in (".yml", ".yaml"):
             continue
         try:
-            doc = yaml.safe_load(fpath.read_text(encoding="utf-8"))
+            doc = yaml.safe_load(fpath.read_text(encoding="utf-8", errors="replace"))
         except (yaml.YAMLError, OSError):
             continue
         if not isinstance(doc, dict):
@@ -962,26 +957,60 @@ def main():
     def add(name, help_):
         return sub.add_parser(name, help=help_)
 
+    def _repo_args(s, *, baseline_flag=False, sha_verify=False):
+        """Add repo positional + --repo flag (positional wins if given)."""
+        s.add_argument("repo_pos", nargs="?", default=None, metavar="REPO",
+                       help="Repository path (positional shorthand for --repo)")
+        s.add_argument("--repo", default=".", metavar="PATH")
+        if baseline_flag:
+            s.add_argument("--baseline", metavar="SHA")
+        if sha_verify:
+            s.add_argument("--verify-shas", action="store_true",
+                           help="Verify pinned SHAs exist via GitHub API.")
+            s.add_argument("--token", metavar="TOKEN", help="GitHub PAT (or set GITHUB_TOKEN).")
+
+    def _resolve_repo(args) -> str:
+        return args.repo_pos if args.repo_pos else args.repo
+
+    # Patch cmd functions to resolve positional before calling _repo()
+    _orig_scan = cmd_scan
+    def cmd_scan_w(args):
+        args.repo = _resolve_repo(args); _orig_scan(args)
+
+    _orig_pin = cmd_pin_audit
+    def cmd_pin_w(args):
+        args.repo = _resolve_repo(args); _orig_pin(args)
+
+    _orig_static = cmd_static
+    def cmd_static_w(args):
+        args.repo = _resolve_repo(args); _orig_static(args)
+
+    _orig_audit = cmd_audit
+    def cmd_audit_w(args):
+        args.repo = _resolve_repo(args); _orig_audit(args)
+
+    _orig_baseline = cmd_baseline
+    def cmd_baseline_w(args):
+        args.repo = _resolve_repo(args); _orig_baseline(args)
+
     s = add("baseline", "Record current (or specified) commit as known-good baseline.")
-    s.add_argument("--repo", default="."); s.add_argument("--commit", metavar="SHA")
-    s.set_defaults(func=cmd_baseline)
+    _repo_args(s); s.add_argument("--commit", metavar="SHA")
+    s.set_defaults(func=cmd_baseline_w)
 
     s = add("scan", "Diff pipeline files and step fingerprints against baseline.")
-    s.add_argument("--repo", default="."); s.add_argument("--baseline", metavar="SHA")
+    _repo_args(s, baseline_flag=True)
     s.add_argument("--verbose", "-v", action="store_true"); s.add_argument("--json", action="store_true")
-    s.set_defaults(func=cmd_scan)
+    s.set_defaults(func=cmd_scan_w)
 
     s = add("pin-audit", "Flag uses: references not pinned to a commit SHA.")
-    s.add_argument("--repo", default=".")
-    s.add_argument("--verify-shas", action="store_true", help="Verify pinned SHAs exist via GitHub API.")
-    s.add_argument("--token", metavar="TOKEN", help="GitHub PAT (or set GITHUB_TOKEN).")
+    _repo_args(s, sha_verify=True)
     s.add_argument("--verbose", "-v", action="store_true"); s.add_argument("--json", action="store_true")
-    s.set_defaults(func=cmd_pin_audit)
+    s.set_defaults(func=cmd_pin_w)
 
     s = add("static", "Static analysis: pull_request_target misuse, script injection, permissions, self-hosted runners, workflow_run chains.")
-    s.add_argument("--repo", default=".")
+    _repo_args(s)
     s.add_argument("--verbose", "-v", action="store_true"); s.add_argument("--json", action="store_true")
-    s.set_defaults(func=cmd_static)
+    s.set_defaults(func=cmd_static_w)
 
     s = add("snapshot", "Capture runner environment to JSON.")
     s.add_argument("--output", default=_SNAPSHOT_FILE, metavar="FILE")
@@ -994,10 +1023,9 @@ def main():
     s.set_defaults(func=cmd_env_diff)
 
     s = add("audit", "Full audit: scan + pin-audit + static analysis combined.")
-    s.add_argument("--repo", default="."); s.add_argument("--baseline", metavar="SHA")
-    s.add_argument("--verify-shas", action="store_true"); s.add_argument("--token", metavar="TOKEN")
+    _repo_args(s, baseline_flag=True, sha_verify=True)
     s.add_argument("--verbose", "-v", action="store_true"); s.add_argument("--json", action="store_true")
-    s.set_defaults(func=cmd_audit)
+    s.set_defaults(func=cmd_audit_w)
 
     s = add("init-runner", "Print a GitHub Actions step block for runner environment monitoring.")
     s.add_argument("--snapshot-path", metavar="PATH")
