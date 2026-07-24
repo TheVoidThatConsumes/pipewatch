@@ -253,6 +253,51 @@ class StepChange:
     baseline_fp: Optional[str]
     current_fp: Optional[str]
     status: str
+    step_preview: Optional[str] = None  # human-readable hint: uses/run first line/name
+
+
+def _preview_step(step: dict) -> str:
+    """Return a one-line description of a GitHub Actions step."""
+    if not isinstance(step, dict):
+        return ""
+    if "uses" in step:
+        return f"uses={step['uses']}"
+    if "run" in step:
+        first = next((ln.strip() for ln in str(step["run"]).splitlines() if ln.strip()), "")
+        return f"run={(first[:80] + '…') if len(first) > 80 else first}"
+    if "name" in step:
+        return f"name={step['name']}"
+    return ""
+
+
+def _preview_gitlab_block(doc: dict, job: str, block_idx: int) -> str:
+    """Return first command from a GitLab before_script/script/after_script block."""
+    block_name = ("before_script", "script", "after_script")[block_idx]
+    job_def = doc.get(job, {})
+    if not isinstance(job_def, dict):
+        return ""
+    cmds = job_def.get(block_name, [])
+    if isinstance(cmds, list) and cmds:
+        first = str(cmds[0]).strip()
+        return f"{block_name}={(first[:80] + '…') if len(first) > 80 else first}"
+    return block_name
+
+
+def _preview_jenkins_stage(content: str, stage_name: str) -> str:
+    """Return first sh/bat command from a Jenkinsfile stage (best-effort, regex-based)."""
+    stages = list(_JENKINS_STAGE.finditer(content))
+    for i, m in enumerate(stages):
+        if m.group(1) != stage_name:
+            continue
+        start = m.start()
+        end = stages[i + 1].start() if i + 1 < len(stages) else len(content)
+        sh_match = _JENKINS_SH.search(content[start:end])
+        if sh_match:
+            cmd = next((g for g in sh_match.groups() if g is not None), "").strip()
+            if cmd:
+                return f"sh={(cmd[:80] + '…') if len(cmd) > 80 else cmd}"
+        return f"stage={stage_name}"
+    return ""
 
 
 def _fps_for_file(fpath: Path, rel: str, content: str) -> dict:
@@ -271,15 +316,37 @@ def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
         base_content = git_show(repo, baseline, rel)
         cur = _fps_for_file(fpath, rel, current_content)
         bas = _fps_for_file(fpath, rel, base_content) if base_content else {}
+
+        is_jenkins = fpath.name == "Jenkinsfile"
+        is_gitlab = fpath.name in (".gitlab-ci.yml", ".gitlab-ci.yaml")
+
+        try:
+            cur_doc = {} if is_jenkins else (yaml.safe_load(current_content) or {})
+        except yaml.YAMLError:
+            cur_doc = {}
+
+        def _get_preview(job_name: str, step_idx: int) -> str:
+            if is_jenkins:
+                return _preview_jenkins_stage(current_content, job_name)
+            if is_gitlab:
+                return _preview_gitlab_block(cur_doc, job_name, step_idx)
+            steps = (cur_doc.get("jobs") or {}).get(job_name, {}).get("steps") or []
+            step = steps[step_idx] if isinstance(steps, list) and step_idx < len(steps) else {}
+            return _preview_step(step)
+
         for key in sorted(set(cur) | set(bas)):
             c, b = cur.get(key), bas.get(key)
+            job_name, step_idx = key
+            preview = _get_preview(job_name, step_idx)
             if b is None:
-                changes.append(StepChange(rel, key[0], key[1], c[0] if c else None,
-                                          None, c[1] if c else None, "added"))
+                changes.append(StepChange(rel, job_name, step_idx, c[0] if c else None,
+                                          None, c[1] if c else None, "added", preview))
             elif c is None:
-                changes.append(StepChange(rel, key[0], key[1], b[0], b[1], None, "removed"))
+                changes.append(StepChange(rel, job_name, step_idx, b[0], b[1], None,
+                                          "removed", preview))
             elif c[1] != b[1]:
-                changes.append(StepChange(rel, key[0], key[1], c[0], b[1], c[1], "modified"))
+                changes.append(StepChange(rel, job_name, step_idx, c[0], b[1], c[1],
+                                          "modified", preview))
     return changes
 
 
@@ -857,21 +924,22 @@ def _findings_from_steps(changes: list[StepChange]) -> list[dict]:
     out = []
     for i, c in enumerate(changes, 1):
         loc = f"{c.path}::{c.job}::step[{c.step_index}]"
+        preview = f"  {c.step_preview}" if c.step_preview else ""
         if c.status == "modified":
             out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "step_fingerprint",
                 f"Step fingerprint changed: {loc}",
                 f"Step {c.step_index} in '{c.job}' changed — possible injected command or swapped action.",
-                loc, f"baseline={c.baseline_fp}  current={c.current_fp}"))
+                loc, f"baseline={c.baseline_fp}  current={c.current_fp}{preview}"))
         elif c.status == "added":
             out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "step_fingerprint",
                 f"New step injected: {loc}",
                 f"Step {c.step_index} in '{c.job}' of '{c.path}' did not exist at baseline.",
-                loc, f"fingerprint={c.current_fp}"))
+                loc, f"fingerprint={c.current_fp}{preview}"))
         else:
             out.append(_finding(f"PW-STEP-{i:03d}", "MEDIUM", "step_fingerprint",
                 f"Step removed: {loc}",
                 f"Step {c.step_index} in '{c.job}' of '{c.path}' was removed since baseline.",
-                loc, f"baseline_fp={c.baseline_fp}"))
+                loc, f"baseline_fp={c.baseline_fp}{preview}"))
     return out
 
 
