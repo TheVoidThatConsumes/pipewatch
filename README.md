@@ -1,6 +1,6 @@
 # pipewatch
 
-**Integrity monitoring and static analysis for CI/CD pipelines.**
+**Integrity monitoring and static analysis for software supply chains.**
 
 CI/CD pipelines are high-value targets: they run with elevated permissions, pull from external registries, and execute arbitrary code on every commit. A single injected step, mutable action pin, or misconfigured trigger is enough to exfiltrate secrets, backdoor build artifacts, or pivot into production infrastructure — and the attack surface is almost always left unmonitored.
 
@@ -29,13 +29,23 @@ Findings are severity-ranked (CRITICAL → HIGH → MEDIUM → LOW → INFO) and
 
 ## Installation
 
+Requires Python 3.12+. `pyyaml` is the only external dependency.
+
+**Via pip (recommended):**
 ```bash
-git clone https://github.com/TheVoidThatConsumes/pipewatch.git
-cd pipewatch
-pip install pyyaml
+pip install pipewatch
 ```
 
-Requires Python 3.12+. `pyyaml` is the only external dependency.
+**Directly from GitHub (no clone required):**
+```bash
+pip install git+https://github.com/TheVoidThatConsumes/pipewatch.git
+```
+
+**Copy into your project** — if you prefer to keep pipewatch self-contained inside a repo you're monitoring, download `pipewatch.py` and drop it anywhere in that repo. Install `pyyaml` manually:
+```bash
+pip install pyyaml
+```
+Then run it as `py pipewatch.py <command>` instead of `pipewatch <command>`.
 
 ---
 
