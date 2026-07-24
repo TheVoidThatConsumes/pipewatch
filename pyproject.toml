@@ -3,11 +3,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pipewatch"
-version = "0.2.0"
+name = "pipewatch-cli"
+version = "0.3.0"
 description = "Integrity monitoring and static analysis for CI/CD pipelines"
 readme = "README.md"
-license = { text = "GPL-2.0-only" }
+license = "CC-BY-4.0"
 requires-python = ">=3.12"
 dependencies = ["pyyaml>=6.0"]
 
