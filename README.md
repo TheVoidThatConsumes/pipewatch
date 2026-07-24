@@ -15,7 +15,7 @@ CI/CD pipelines are high-value targets: they run with elevated permissions, pull
 | **Baseline diff** | Pipeline files modified, added, or deleted since a known-good commit |
 | **Step fingerprinting** | Individual steps injected, removed, or silently modified between commits |
 | **`pull_request_target` misuse** | Workflows that check out and execute PR head code with base-branch write permissions — the pattern behind numerous CI poisoning attacks |
-| **Script injection** | `run:` blocks interpolating user-controlled context values (`github.event.pull_request.title`, `github.event.comment.body`, etc.) into shell commands |
+| **Script injection** | `run:` blocks and `env:` blocks that route user-controlled context values (`github.event.pull_request.title`, `github.event.comment.body`, etc.) into shell commands — both direct interpolation and the indirect `env: VAR: ${{ ctx }}` → `$VAR` pattern are detected |
 | **Permission misconfiguration** | Missing `permissions:` blocks, `write-all` scopes, `secrets: inherit` |
 | **Mutable action pins** | `uses:` references not locked to a full commit SHA — tags like `v3` can be silently overwritten by a supply-chain attacker |
 | **Invalid pinned SHAs** | Pinned SHAs that do not exist in the upstream action repo (typos, deleted commits, fork SHAs) |
@@ -94,7 +94,7 @@ Flags `uses:` references not pinned to a full 40- or 64-character commit SHA. Wi
 pipewatch pin-audit [--repo PATH] [--verify-shas] [--token TOKEN] [--verbose] [--json]
 ```
 
-Rate limit: 60 requests/hr unauthenticated, 5 000/hr with `--token` or `GITHUB_TOKEN`.
+Rate limit: 60 requests/hr unauthenticated, 5 000/hr with `--token` or `GITHUB_TOKEN`. API calls are deduplicated — the same `owner/repo@sha` is only verified once regardless of how many steps reference it. Findings are **not** deduplicated: if the same invalid SHA appears across multiple workflow files or jobs, each affected step produces its own finding so the full scope of a compromised action is visible in the report.
 
 ---
 
@@ -106,6 +106,14 @@ pipewatch snapshot [--output FILE]
 ```
 
 Tracked tools: `python3`, `python`, `node`, `npm`, `pip`, `pip3`, `git`, `curl`, `wget`, `docker`, `kubectl`, `terraform`, `aws`, `gcloud`, `az`. Volatile per-run variables (`GITHUB_RUN_ID`, `RUNNER_TEMP`, etc.) are excluded to prevent noise on every comparison.
+
+**Credential exclusion** — environment variables whose names contain `token`, `secret`, `key`, `password`, `passwd`, `pwd`, `auth`, `credential`, `private`, or `api_key` (case-insensitive) are never written to the snapshot file. This prevents secrets such as `GITHUB_TOKEN` or `PIPEWATCH_HMAC_KEY` from being persisted to disk or uploaded to the Actions cache. Note that a legitimately non-sensitive variable with one of these terms in its name will also be excluded; rename it if you need `env-diff` to track it.
+
+Add the snapshot file to `.gitignore` to prevent it from being accidentally committed:
+
+```
+.pipewatch_env_snapshot.json
+```
 
 ---
 
@@ -199,11 +207,20 @@ Set `PIPEWATCH_HMAC_KEY` before running `baseline`. The baseline is stored as a 
 {
   "commit": "abc123...",
   "timestamp": "2025-01-01T00:00:00+00:00",
-  "hmac": "<sha256-hmac>"
+  "hmac": "<sha256-hmac-of-commit-and-timestamp>"
 }
 ```
 
-On `scan` or `audit`, the HMAC is verified before the baseline commit is trusted. A modified baseline file causes an immediate exit with an error rather than a silent false-clean result. Store the key in a CI secret (`PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEWATCH_HMAC_KEY }}`).
+The HMAC is computed over both the commit SHA **and** the timestamp, bound together. This protects against two distinct attacks:
+
+- **Tampering** — an attacker who modifies the `commit` field to point to an older known-good commit cannot produce a valid HMAC without the key.
+- **Replay** — an attacker who reverts the baseline file to a previously-valid signed snapshot (to suppress findings introduced after that point) is also blocked, because the timestamp is part of the signed payload and the stored timestamp would no longer match the signature of any rewritten content.
+
+On `scan` or `audit`, the HMAC is verified before the baseline commit is trusted. Any verification failure causes an immediate exit with an error.
+
+**Format-downgrade protection** — if `PIPEWATCH_HMAC_KEY` is set and the baseline file is in plain-text format (a raw commit SHA rather than signed JSON), the tool refuses to proceed. An attacker cannot bypass signing by overwriting the file with an unsigned commit SHA. If you set `PIPEWATCH_HMAC_KEY` for the first time on a repo that already has an unsigned baseline, re-run `pipewatch baseline` to generate a signed one before your next scan.
+
+Store the key in a CI secret (`PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEWATCH_HMAC_KEY }}`).
 
 ---
 
@@ -225,9 +242,9 @@ Use `init-runner` to add runner environment monitoring alongside the audit step.
 
 ## Design Decisions
 
-**HMAC-signed baselines** — tamper-evident storage for the known-good commit reference. An attacker who can write to the repo but wants to suppress findings would need to forge the HMAC, not just overwrite the file.
+**HMAC-signed baselines** — tamper-evident storage for the known-good commit reference. The HMAC covers both the commit SHA and the timestamp, so an attacker who can write to the repo but wants to suppress findings would need to forge the HMAC — not just overwrite the file or revert it to an older signed state. Attempting to downgrade a signed baseline to unsigned plain text is also refused when `PIPEWATCH_HMAC_KEY` is set.
 
-**Volatile variable exclusion** — `snapshot` strips run-specific GitHub variables so that `env-diff` doesn't generate noise on every comparison. Only structurally stable variables that could indicate environment manipulation are tracked.
+**Volatile variable exclusion** — `snapshot` strips run-specific GitHub variables so that `env-diff` doesn't generate noise on every comparison. Only structurally stable variables that could indicate environment manipulation are tracked. Variables whose names suggest credentials (containing `token`, `secret`, `key`, `password`, etc.) are also excluded so secrets are never written to the snapshot file or the Actions cache.
 
 **Conservative SHA verification** — `--verify-shas` treats network failures as non-findings. A flaky connection or GitHub API outage should not produce spurious HIGH alerts.
 

