@@ -944,13 +944,33 @@ def _findings_from_steps(changes: list[StepChange]) -> list[dict]:
 
 
 def _findings_from_pinning(pinning: list[PinningFinding]) -> list[dict]:
-    return [_finding(
-        f"PW-PIN-{i:03d}", "MEDIUM", "unpinned_dependency",
-        f"Unpinned action: {p.uses_ref}",
-        f"Step {p.step_index} in '{p.job}' of '{p.path}' uses '{p.uses_ref}', "
-        "not pinned to a commit SHA — mutable tags can be silently overwritten.",
-        f"{p.path}::{p.job}::step[{p.step_index}]", p.recommendation,
-    ) for i, p in enumerate(pinning, 1)]
+    """One finding per unique action reference, listing all affected files and step count."""
+    # Group by uses_ref so actions/checkout@v3 across 16 files → one finding.
+    grouped: dict[str, list[PinningFinding]] = {}
+    for p in pinning:
+        grouped.setdefault(p.uses_ref, []).append(p)
+
+    out = []
+    for i, (ref, instances) in enumerate(sorted(grouped.items()), 1):
+        affected_files = sorted(set(p.path for p in instances))
+        step_count = len(instances)
+        file_count = len(affected_files)
+        action = ref.split("@")[0] if "@" in ref else ref
+        tag = ref.split("@")[1] if "@" in ref else "unversioned"
+        file_list = ", ".join(affected_files[:5])
+        if file_count > 5:
+            file_list += f" … and {file_count - 5} more"
+        out.append(_finding(
+            f"PW-PIN-{i:03d}", "MEDIUM", "unpinned_dependency",
+            f"Unpinned action: {ref}",
+            f"'{ref}' is not pinned to a commit SHA — mutable tags can be silently "
+            "overwritten by a supply-chain attacker. "
+            f"Found in {step_count} step(s) across {file_count} file(s).",
+            file_list,
+            f"fix: uses: {action}@<sha>  # {tag}\n"
+            f"  https://github.com/{action}/commits",
+        ))
+    return out
 
 
 def _findings_from_env(diff: EnvDiff) -> list[dict]:
