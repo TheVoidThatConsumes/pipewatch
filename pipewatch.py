@@ -34,7 +34,7 @@ from typing import Optional
 
 import yaml
 
-__version__ = "0.2.0"
+__version__ = "0.5.0"
 
 _BASELINE_FILE = ".pipewatch_baseline"
 _SNAPSHOT_FILE = ".pipewatch_env_snapshot.json"

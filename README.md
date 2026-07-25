@@ -190,7 +190,7 @@ All commands accept `--json`:
 ```
 {
   "tool": "pipewatch",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "timestamp": "2025-01-01T00:00:00+00:00",
   "repo": "/path/to/repo",
   "baseline_commit": "abc123...",
