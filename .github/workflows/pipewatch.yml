@@ -26,7 +26,7 @@ jobs:
         run: pip install pipewatch-cli
 
       - name: Set baseline
-        run: pipewatch baseline --commit 7e3121e 
+        run: pipewatch baseline --commit b1ec812 
         env:
           PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEXSCAN }}
 
