@@ -2,9 +2,9 @@
 
 **Integrity monitoring and static analysis for software supply chains.**
 
-CI/CD pipelines are high-value targets: they run with elevated permissions, pull from external registries, and execute arbitrary code on every commit. A single injected step, mutable action pin, or misconfigured trigger is enough to exfiltrate secrets, backdoor build artifacts, or pivot into production infrastructure -- and the attack surface is almost always left unmonitored.
+CI/CD pipelines are high-value targets, given that they run with elevated permissions, pull from external registries, and execute arbitrary code on every commit. A single injected step, mutable action pin or misconfigured trigger is enough to exfiltrate secrets or pivot into production infrastructure, and the attack surface is almost always left unmonitored.
 
-`pipewatch` audits GitHub Actions workflows, GitLab CI, and Jenkinsfiles for exactly these risks. It combines commit-anchored baseline diffing, per-step SHA-256 fingerprinting, static misconfiguration analysis, and runner environment tracking into a single CLI tool. All commands exit non-zero on findings and emit structured JSON -- suitable as a pipeline gate, a pre-merge check, or a periodic audit job.
+`pipewatch` audits GitHub Actions workflows, GitLab CI, and Jenkinsfiles for these risks. It combines commit-anchored baseline diffing, per-step SHA-256 fingerprinting, static misconfiguration analysis, and runner environment tracking into a single CLI tool. All commands exit non-zero on findings and emit structured JSON suitable as a pipeline gate, a pre-merge check, or a periodic audit job.
 
 ---
 
@@ -72,7 +72,7 @@ pipewatch audit --verify-shas
 
 ### `baseline`
 
-Records the current (or a specified) commit as the integrity reference point. Set `PIPEWATCH_HMAC_KEY` to store a signed baseline -- if the file is modified to suppress future findings, the HMAC check will fail and the tool will refuse to proceed.
+Records the current (or a specified) commit as the integrity reference point. Set `PIPEWATCH_HMAC_KEY` to store a signed baseline. If the file is modified to suppress future findings, the HMAC check will fail and the tool will refuse to proceed.
 
 ```
 pipewatch baseline [--repo PATH] [--commit SHA]
@@ -82,7 +82,7 @@ pipewatch baseline [--repo PATH] [--commit SHA]
 
 ### `scan`
 
-Diffs pipeline files and per-step fingerprints against the baseline commit. Detects both file-level changes (unified diff) and step-level tampering -- a step whose `uses`, `run`, `with`, `env`, or `shell` fields change gets flagged even if the surrounding file diff looks innocuous.
+Diffs pipeline files and per-step fingerprints against the baseline commit. Detects both file-level changes (unified diff) and step-level tampering, a step whose `uses`, `run`, `with`, `env`, or `shell` fields change gets flagged even if the surrounding file diff looks normal.
 
 ```
 pipewatch scan [--repo PATH] [--baseline SHA] [--verbose] [--json]
@@ -118,7 +118,7 @@ Rate limit: 60 requests/hr unauthenticated, 5000/hr with `--token` or `GITHUB_TO
 
 ### `snapshot`
 
-Captures the runner environment -- environment variables and tool versions -- to a JSON file for later comparison.
+Captures the runner environment (environment variables and tool versions) to a JSON file for later comparison.
 
 ```
 pipewatch snapshot [--output FILE]
@@ -138,7 +138,7 @@ Add the snapshot file to `.gitignore` to prevent it from being accidentally comm
 
 ### `env-diff`
 
-Diffs two runner environment snapshots. Detects new, removed, or changed environment variables and tool versions -- useful for identifying runner poisoning or unexpected environment mutations between runs. If `--current-snapshot` is omitted, captures the live environment.
+Diffs two runner environment snapshots. Detects new, removed, or changed environment variables and tool versions (useful for identifying runner poisoning or unexpected environment mutations between runs). If `--current-snapshot` is omitted, it captures the live environment.
 
 ```
 pipewatch env-diff BASELINE_SNAPSHOT [--current-snapshot FILE] [--repo PATH] [--verbose] [--json]
@@ -264,13 +264,13 @@ Use `init-runner` to add runner environment monitoring alongside the audit step.
 
 ## Design Decisions
 
-**HMAC-signed baselines** -- tamper-evident storage for the known-good commit reference. The HMAC covers both the commit SHA and the timestamp, so an attacker who can write to the repo but wants to suppress findings would need to forge the HMAC -- not just overwrite the file or revert it to an older signed state. Attempting to downgrade a signed baseline to unsigned plain text is also refused when `PIPEWATCH_HMAC_KEY` is set.
+**HMAC-signed baselines** -- tamper-evident storage for the known-good commit reference. The HMAC covers both the commit SHA and the timestamp, so an attacker who can write to the repo but wants to suppress findings would need to forge the HMAC, not just overwrite the file or revert it to an older signed state. Attempting to downgrade a signed baseline to unsigned plain text is also refused when `PIPEWATCH_HMAC_KEY` is set.
 
-**Volatile variable exclusion** -- `snapshot` strips run-specific GitHub variables so that `env-diff` does not generate noise on every comparison. Only structurally stable variables that could indicate environment manipulation are tracked. Variables whose names suggest credentials are also excluded so secrets are never written to the snapshot file or the Actions cache.
+**Volatile variable exclusion** -- `snapshot` strips run-specific GitHub variables so that `env-diff` does not generate noise on every comparison. Only structurally stable variables that could indicate environment manipulation are tracked. Variables whose names suggest credentials are also excluded, so secrets are never written to the snapshot file or the Actions cache.
 
-**Conservative SHA verification** -- `--verify-shas` treats network failures as non-findings. A flaky connection or GitHub API outage should not produce spurious HIGH alerts.
+**Conservative SHA verification** -- `--verify-shas` treats network failures as non-findings. A bad internet connection or GitHub API outage should not produce unexpected HIGH alerts.
 
-**Stdlib-first** -- `pyyaml` is the only dependency. The tool audits supply-chain risk; its own footprint is minimal by design.
+**Stdlib-first** -- `pyyaml` is the only dependency. The tool audits supply-chain risk and its own footprint is minimal by design.
 
 ---
 
