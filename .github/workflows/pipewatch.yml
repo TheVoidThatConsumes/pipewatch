@@ -1,0 +1,39 @@
+name: pipewatch audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pipewatch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pipewatch
+        run: pip install pipewatch-cli
+
+      - name: Set baseline
+        run: pipewatch baseline --commit ${{ github.event.before }}
+        env:
+          PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEXSCAN }}
+
+      - name: Run audit
+        run: pipewatch audit --verify-shas --json | tee pw-report.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEXSCAN }}
+
+      - name: Fail on HIGH or CRITICAL
+        run: jq -e '.summary.HIGH == 0 and .summary.CRITICAL == 0' pw-report.json
