@@ -106,7 +106,7 @@ Checks: `pull_request_target` misuse, script injection, missing or overpermissio
 
 ### `pin-audit`
 
-Flags `uses:` references not pinned to a full 40- or 64-character commit SHA. With `--verify-shas`, makes live GitHub API calls to confirm each pinned SHA actually exists in its upstream repository.
+Flags `uses:` references not pinned to a full 40- or 64-character commit SHA. With `--verify-shas`, it makes live GitHub API calls to confirm each pinned SHA actually exists in its upstream repository.
 
 ```
 pipewatch pin-audit [--repo PATH] [--verify-shas] [--token TOKEN] [--verbose] [--json]
@@ -126,7 +126,7 @@ pipewatch snapshot [--output FILE]
 
 Tracked tools: `python3`, `python`, `node`, `npm`, `pip`, `pip3`, `git`, `curl`, `wget`, `docker`, `kubectl`, `terraform`, `aws`, `gcloud`, `az`. Volatile per-run variables (`GITHUB_RUN_ID`, `RUNNER_TEMP`, etc.) are excluded to prevent noise on every comparison.
 
-**Credential exclusion** -- environment variables whose names contain `token`, `secret`, `key`, `password`, `passwd`, `pwd`, `auth`, `credential`, `private`, or `api_key` (case-insensitive) are never written to the snapshot file. This prevents secrets such as `GITHUB_TOKEN` or `PIPEWATCH_HMAC_KEY` from being persisted to disk or uploaded to the Actions cache.
+**Credential exclusion:** Environment variables whose names contain `token`, `secret`, `key`, `password`, `passwd`, `pwd`, `auth`, `credential`, `private`, or `api_key` (case-insensitive) are never written to the snapshot file. This prevents secrets such as `GITHUB_TOKEN` or `PIPEWATCH_HMAC_KEY` from being persisted to disk or uploaded to the Actions cache.
 
 Add the snapshot file to `.gitignore` to prevent it from being accidentally committed:
 
