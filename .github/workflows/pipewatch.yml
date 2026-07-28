@@ -25,11 +25,6 @@ jobs:
       - name: Install pipewatch
         run: pip install pipewatch-cli
 
-      - name: Set baseline
-        run: pipewatch baseline --commit b1ec812 
-        env:
-          PIPEWATCH_HMAC_KEY: ${{ secrets.PIPEXSCAN }}
-
       - name: Run audit
         run: pipewatch audit --verify-shas --json | tee pw-report.json
         env:
