@@ -1004,7 +1004,7 @@ def _findings_from_env(diff: EnvDiff) -> list[dict]:
     return out
 
 
-def build_report(findings: list[dict], repo: str, baseline: Optional[str]) -> dict:
+def build_report(findings: list[dict], repo: "str | Path", baseline: Optional[str]) -> dict:
     counts = {s: 0 for s in _SEV_ORDER}
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
