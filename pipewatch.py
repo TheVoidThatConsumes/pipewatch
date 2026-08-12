@@ -1009,6 +1009,7 @@ def build_report(findings: list[dict], repo: str, baseline: Optional[str]) -> di
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
     return {
+        "schema_version": "1.0",
         "tool": "pipewatch", "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "repo": str(repo), "baseline_commit": baseline,
