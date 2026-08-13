@@ -271,6 +271,9 @@ class StepChange:
     current_fp: Optional[str]
     status: str
     step_preview: Optional[str] = None  # human-readable hint: uses/run first line/name
+    parse_failed: bool = False  # True if THIS "removed" reading is an artifact
+    # of the current file failing to parse (cur_doc == {}), not a real edit.
+    # Only meaningful when status == "removed" — see diff_fingerprints.
 
 
 def _preview_step(step: dict) -> str:
@@ -339,8 +342,10 @@ def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
 
         try:
             cur_doc = {} if is_jenkins else (yaml.safe_load(current_content) or {})
+            cur_parse_failed = False
         except yaml.YAMLError:
             cur_doc = {}
+            cur_parse_failed = not is_jenkins
 
         def _get_preview(job_name: str, step_idx: int) -> str:
             if is_jenkins:
@@ -360,7 +365,7 @@ def diff_fingerprints(repo: Path, baseline: str) -> list[StepChange]:
                                           None, c[1] if c else None, "added", preview))
             elif c is None:
                 changes.append(StepChange(rel, job_name, step_idx, b[0], b[1], None,
-                                          "removed", preview))
+                                          "removed", preview, parse_failed=cur_parse_failed))
             elif c[1] != b[1]:
                 changes.append(StepChange(rel, job_name, step_idx, c[0], b[1], c[1],
                                           "modified", preview))
@@ -998,9 +1003,18 @@ def _findings_from_steps(changes: list[StepChange]) -> list[dict]:
                 f"Step {c.step_index} in '{c.job}' of '{c.path}' did not exist at baseline.",
                 loc, f"fingerprint={c.current_fp}{preview}"))
         else:
+            desc = (
+                f"Step {c.step_index} in '{c.job}' of '{c.path}' appears removed since "
+                "baseline, but this is because the current version of the file could not "
+                "be parsed as valid YAML — pipewatch cannot confirm whether the step was "
+                "actually removed or the parser simply failed to read it. Treat as reduced "
+                "visibility, not a confirmed removal; check the file's syntax directly."
+                if c.parse_failed else
+                f"Step {c.step_index} in '{c.job}' of '{c.path}' was removed since baseline."
+            )
             out.append(_finding(f"PW-STEP-{i:03d}", "MEDIUM", "workflow-step-tampering",
                 f"Step removed: {loc}",
-                f"Step {c.step_index} in '{c.job}' of '{c.path}' was removed since baseline.",
+                desc,
                 loc, f"baseline_fp={c.baseline_fp}{preview}"))
     return out
 
