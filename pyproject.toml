@@ -31,4 +31,4 @@ Source = "https://github.com/TheVoidThatConsumes/pipewatch"
 pipewatch = "pipewatch:main"
 
 [tool.setuptools]
-py-modules = ["pipewatch"]
+py-modules = ["pipewatch", "pipewatch_verify"]

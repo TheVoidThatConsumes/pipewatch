@@ -25,8 +25,6 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -717,79 +715,6 @@ def audit_pinning(repo: Path) -> list[PinningFinding]:
     return findings
 
 
-def _verify_commit_exists(owner: str, repo_name: str, sha: str, token: Optional[str]) -> bool:
-    """Return False only if GitHub's API returns 404 for this commit."""
-    url = f"https://api.github.com/repos/{owner}/{repo_name}/git/commits/{sha}"
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": f"pipewatch/{__version__}",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except urllib.error.HTTPError as e:
-        return e.code != 404
-    except Exception:
-        return True  # network unavailable — don't raise false positives
-
-
-def verify_pinned_shas(repo: Path, token: Optional[str] = None) -> list[dict]:
-    """
-    For each SHA-pinned action, verify the commit exists in that repo via GitHub API.
-    Opt-in: pass --verify-shas. Rate limit: 60 req/hr unauthenticated, 5000 with --token.
-
-    API calls are deduplicated (one call per unique owner/repo+SHA pair), but a finding
-    is emitted for *every* affected step so callers see the full blast radius of a
-    compromised or deleted commit.
-    """
-    findings = []
-    # Cache API results: (owner/repo, sha) → bool (True = exists / inconclusive)
-    verified: dict[tuple[str, str], bool] = {}
-
-    for fpath in find_pipeline_files(repo):
-        if fpath.suffix not in (".yml", ".yaml"):
-            continue
-        try:
-            doc = yaml.safe_load(fpath.read_text(encoding="utf-8", errors="replace"))
-        except (yaml.YAMLError, OSError):
-            continue
-        if not isinstance(doc, dict):
-            continue
-
-        rel = str(fpath.relative_to(repo))
-        for job, job_def in (doc.get("jobs") or {}).items():
-            if not isinstance(job_def, dict):
-                continue
-            for idx, step in enumerate(job_def.get("steps") or []):
-                if not isinstance(step, dict) or "uses" not in step:
-                    continue
-                ref: str = step["uses"]
-                if ref.startswith("./") or "@" not in ref or not _is_sha_pinned(ref):
-                    continue
-                action, _, sha = ref.rpartition("@")
-                parts = action.split("/")
-                if len(parts) < 2:
-                    continue
-                owner, repo_name = parts[0], parts[1]
-                key = (f"{owner}/{repo_name}", sha)
-                if key not in verified:
-                    verified[key] = _verify_commit_exists(owner, repo_name, sha, token)
-                if not verified[key]:
-                    findings.append(_finding(
-                        f"PW-SHA-{len(findings)+1:03d}", "HIGH",
-                        "invalid-pin",
-                        f"Pinned SHA not found in repo: {ref}",
-                        f"Commit {sha[:8]}... does not exist in {owner}/{repo_name}. "
-                        "This may be a typo, a SHA from a fork, or a deleted commit.",
-                        f"{rel}::{job}::step[{idx}]",
-                        f"checked: GET /repos/{owner}/{repo_name}/git/commits/{sha}",
-                    ))
-    return findings
-
-
 # ── runner environment ────────────────────────────────────────────────────────
 
 @dataclass
@@ -1153,11 +1078,28 @@ def cmd_scan(args):
     sys.exit(1 if findings else 0)
 
 
+def _run_verify_shas(repo: Path, token: Optional[str]) -> list[dict]:
+    """Lazy-import the network-isolated verify module only when
+    --verify-shas is actually requested (pipewatch.py itself must have
+    zero network-capable imports — this keeps it that way at both the
+    static-grep and the "only imported when opted into" level). Fails
+    loudly on VerifyNetworkError rather than letting a network problem
+    masquerade as a clean scan."""
+    from pipewatch_verify import verify_pinned_shas, VerifyNetworkError
+    try:
+        return verify_pinned_shas(
+            repo, find_pipeline_files, _is_sha_pinned, _finding,
+            token=token, _version=__version__,
+        )
+    except VerifyNetworkError as e:
+        sys.exit(f"error: --verify-shas could not reach GitHub's API: {e}")
+
+
 def cmd_pin_audit(args):
     repo = _repo(args.repo)
     findings = _findings_from_pinning(audit_pinning(repo))
     if args.verify_shas:
-        findings += verify_pinned_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
+        findings += _run_verify_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
     _emit(build_report(findings, repo, None), args.json, args.verbose)
     sys.exit(1 if findings else 0)
 
@@ -1199,7 +1141,7 @@ def cmd_audit(args):
         + static_findings
     )
     if args.verify_shas:
-        specific_findings += verify_pinned_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
+        specific_findings += _run_verify_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
 
     # "files already explained" for the pipeline-file-change fallback:
     # built from raw per-detector results, NOT from other findings'
