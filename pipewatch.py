@@ -150,6 +150,22 @@ class FileDiff:
     status: str
     diff_lines: list[str] = field(default_factory=list)
     baseline_commit: Optional[str] = None
+    parse_failed: bool = False
+
+
+def _yaml_parse_failed(fpath: Path, content: str) -> bool:
+    """True if this pipeline file's *current* content can't be YAML-parsed
+    at all — used to distinguish 'couldn't be analyzed' from 'analyzed,
+    nothing specific matched' in pipeline-file-change's description.
+    Jenkinsfiles aren't YAML and are exempt (previewed via regex, not
+    yaml.safe_load, elsewhere in this module)."""
+    if fpath.name == "Jenkinsfile":
+        return False
+    try:
+        yaml.safe_load(content)
+        return False
+    except yaml.YAMLError:
+        return True
 
 
 def diff_pipeline_files(repo: Path, baseline: str) -> list[FileDiff]:
@@ -158,16 +174,17 @@ def diff_pipeline_files(repo: Path, baseline: str) -> list[FileDiff]:
         rel = str(fpath.relative_to(repo))
         current = fpath.read_text(encoding="utf-8", errors="replace")
         base = git_show(repo, baseline, rel)
+        parse_failed = _yaml_parse_failed(fpath, current)
         if base is None:
             results.append(FileDiff(rel, "added", list(difflib.unified_diff(
                 [], current.splitlines(keepends=True),
                 fromfile=f"{rel} (not in baseline)", tofile=f"{rel} (current)")),
-                baseline))
+                baseline, parse_failed))
         elif base != current:
             results.append(FileDiff(rel, "modified", list(difflib.unified_diff(
                 base.splitlines(keepends=True), current.splitlines(keepends=True),
                 fromfile=f"{rel} @ {baseline}", tofile=f"{rel} (current)")),
-                baseline))
+                baseline, parse_failed))
     for path in git_deleted_pipeline_files(repo, baseline):
         results.append(FileDiff(path, "deleted", baseline_commit=baseline))
     return results
@@ -407,7 +424,7 @@ def _check_pr_target_misuse(docs: dict[str, dict]) -> list[dict]:
                 if pr_head_re.search(with_block):
                     findings.append(_finding(
                         f"PW-PRT-{len(findings)+1:03d}", "HIGH",
-                        "pull_request_target_misuse",
+                        "pull-request-target",
                         f"pull_request_target checks out PR head: {path}::{job_name}::step[{idx}]",
                         "pull_request_target runs with write permissions against the base branch. "
                         "Checking out and executing PR head code hands arbitrary code execution to "
@@ -460,7 +477,7 @@ def _check_script_injection(docs: dict[str, dict]) -> list[dict]:
 
                 findings.append(_finding(
                     f"PW-INJ-{len(findings)+1:03d}", "HIGH",
-                    "script_injection",
+                    "script-injection",
                     f"Script injection risk: {path}::{job_name}::step[{idx}]",
                     "A user-controlled context value is interpolated into a shell command "
                     "(directly in run: or via an env: variable). An attacker can craft a "
@@ -481,7 +498,7 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
         if top_perms is None:
             findings.append(_finding(
                 f"PW-PERM-{len(findings)+1:03d}", "MEDIUM",
-                "permissions",
+                "permission-misconfig",
                 f"No permissions block: {path}",
                 "Without an explicit permissions block the workflow inherits the repository's "
                 "default — which may grant write access to all scopes. "
@@ -492,7 +509,7 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
         elif top_perms == "write-all":
             findings.append(_finding(
                 f"PW-PERM-{len(findings)+1:03d}", "HIGH",
-                "permissions",
+                "permission-misconfig",
                 f"permissions: write-all in {path}",
                 "write-all grants write access to every scope. "
                 "Scope permissions to the minimum each job actually needs.",
@@ -505,7 +522,7 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
             if job_perms == "write-all":
                 findings.append(_finding(
                     f"PW-PERM-{len(findings)+1:03d}", "HIGH",
-                    "permissions",
+                    "permission-misconfig",
                     f"Job permissions: write-all in {path}::{job_name}",
                     f"Job '{job_name}' has permissions: write-all.",
                     f"{path}::{job_name}",
@@ -515,7 +532,7 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
                 if write_scopes:
                     findings.append(_finding(
                         f"PW-PERM-{len(findings)+1:03d}", "HIGH",
-                        "permissions",
+                        "permission-misconfig",
                         f"Job has write-scoped permissions: {path}::{job_name}",
                         f"Job '{job_name}' grants write access to: {write_scopes}. "
                         "Scope each permission to the minimum the job actually needs.",
@@ -525,7 +542,7 @@ def _check_permissions(docs: dict[str, dict]) -> list[dict]:
             if job_def.get("secrets") == "inherit":
                 findings.append(_finding(
                     f"PW-PERM-{len(findings)+1:03d}", "MEDIUM",
-                    "permissions",
+                    "permission-misconfig",
                     f"secrets: inherit in {path}::{job_name}",
                     f"Job '{job_name}' passes all secrets to a called workflow. "
                     "Pass only the specific secrets each called workflow needs.",
@@ -561,7 +578,7 @@ def _check_self_hosted(docs: dict[str, dict]) -> list[dict]:
             if is_self_hosted:
                 findings.append(_finding(
                     f"PW-RUNNER-{len(findings)+1:03d}", "INFO",
-                    "self_hosted_runner",
+                    "self-hosted-runner",
                     f"Self-hosted runner: {path}::{job_name}",
                     f"Job '{job_name}' runs on '{runs_on}'. Self-hosted runners are not ephemeral, "
                     "not managed by GitHub, and may persist state between runs. "
@@ -758,7 +775,7 @@ def verify_pinned_shas(repo: Path, token: Optional[str] = None) -> list[dict]:
                 if not verified[key]:
                     findings.append(_finding(
                         f"PW-SHA-{len(findings)+1:03d}", "HIGH",
-                        "invalid_pinned_sha",
+                        "invalid-pin",
                         f"Pinned SHA not found in repo: {ref}",
                         f"Commit {sha[:8]}... does not exist in {owner}/{repo_name}. "
                         "This may be a typo, a SHA from a fork, or a deleted commit.",
@@ -909,15 +926,60 @@ def _finding(fid, severity, category, title, description, location, evidence="")
             "location": location, "evidence": evidence}
 
 
-def _findings_from_diffs(diffs: list[FileDiff]) -> list[dict]:
-    return [_finding(
-        f"PW-DIFF-{i:03d}",
-        "HIGH" if d.status in ("modified", "deleted") else "MEDIUM",
-        "pipeline_file_change",
-        f"Pipeline file {d.status}: {d.path}",
-        f"'{d.path}' was {d.status} since baseline {d.baseline_commit}.",
-        d.path, "".join(d.diff_lines[:50]),
-    ) for i, d in enumerate(diffs, 1)]
+def _findings_from_diffs(
+    diffs: list[FileDiff],
+    explained_files: frozenset[str] = frozenset(),
+) -> list[dict]:
+    """Emit `pipeline-file-change` only as a fallback.
+
+    Per the closed Section-1 category-reconciliation decision:
+    `pipeline-file-change` fires for a tracked pipeline file that (a)
+    genuinely changed from baseline and (b) has zero findings from any
+    other pipewatch category referencing that same file in this same run
+    — i.e. nothing more specific already explained the change. This
+    includes the case where step-level diffing structurally can't run at
+    all (unparseable YAML, an unrecognized job/step shape): that file
+    trivially has zero specific findings, so it correctly falls into this
+    fallback. `explained_files` is derived from the *raw* per-detector
+    results (StepChange.path, PinningFinding.path, static-analysis
+    locations) rather than from other findings' `location` text, because
+    the pinning finding's `location` is a grouped, truncated (max-5)
+    comma-list and can't be trusted as a complete file membership check.
+    """
+    out = []
+    for i, d in enumerate(diffs, 1):
+        if d.path in explained_files:
+            continue
+        out.append(_finding(
+            f"PW-DIFF-{i:03d}",
+            "MEDIUM",
+            "pipeline-file-change",
+            f"Pipeline file {d.status}: {d.path}",
+            _pipeline_file_change_description(d),
+            d.path, "".join(d.diff_lines[:50]),
+        ))
+    return out
+
+
+def _pipeline_file_change_description(d: "FileDiff") -> str:
+    """Distinguish, in prose only (never a separate category/severity),
+    the two ways a file can land in the pipeline-file-change fallback:
+    genuinely nothing-specific-matched, vs. step-level analysis couldn't
+    even attempt to run on it (parse failure / unrecognized shape)."""
+    if getattr(d, "parse_failed", False):
+        return (
+            f"'{d.path}' was {d.status} since baseline {d.baseline_commit}, and could "
+            "not be parsed for step-level analysis (unparseable YAML or an unrecognized "
+            "job/step shape). No specific finding could be produced because nothing "
+            "could analyze it — this is reduced visibility, not evidence of malice, so "
+            "severity is not escalated."
+        )
+    return (
+        f"'{d.path}' was {d.status} since baseline {d.baseline_commit}, and no more "
+        "specific detector (step fingerprinting, pinning, permissions, injection, "
+        "pull_request_target misuse, runner drift) produced a finding referencing it "
+        "this run."
+    )
 
 
 def _findings_from_steps(changes: list[StepChange]) -> list[dict]:
@@ -926,17 +988,17 @@ def _findings_from_steps(changes: list[StepChange]) -> list[dict]:
         loc = f"{c.path}::{c.job}::step[{c.step_index}]"
         preview = f"  {c.step_preview}" if c.step_preview else ""
         if c.status == "modified":
-            out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "step_fingerprint",
+            out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "workflow-step-tampering",
                 f"Step fingerprint changed: {loc}",
                 f"Step {c.step_index} in '{c.job}' changed — possible injected command or swapped action.",
                 loc, f"baseline={c.baseline_fp}  current={c.current_fp}{preview}"))
         elif c.status == "added":
-            out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "step_fingerprint",
+            out.append(_finding(f"PW-STEP-{i:03d}", "HIGH", "workflow-step-tampering",
                 f"New step injected: {loc}",
                 f"Step {c.step_index} in '{c.job}' of '{c.path}' did not exist at baseline.",
                 loc, f"fingerprint={c.current_fp}{preview}"))
         else:
-            out.append(_finding(f"PW-STEP-{i:03d}", "MEDIUM", "step_fingerprint",
+            out.append(_finding(f"PW-STEP-{i:03d}", "MEDIUM", "workflow-step-tampering",
                 f"Step removed: {loc}",
                 f"Step {c.step_index} in '{c.job}' of '{c.path}' was removed since baseline.",
                 loc, f"baseline_fp={c.baseline_fp}{preview}"))
@@ -961,7 +1023,7 @@ def _findings_from_pinning(pinning: list[PinningFinding]) -> list[dict]:
         if file_count > 5:
             file_list += f" … and {file_count - 5} more"
         out.append(_finding(
-            f"PW-PIN-{i:03d}", "MEDIUM", "unpinned_dependency",
+            f"PW-PIN-{i:03d}", "MEDIUM", "mutable-pin",
             f"Unpinned action: {ref}",
             f"'{ref}' is not pinned to a commit SHA — mutable tags can be silently "
             "overwritten by a supply-chain attacker. "
@@ -976,29 +1038,29 @@ def _findings_from_pinning(pinning: list[PinningFinding]) -> list[dict]:
 def _findings_from_env(diff: EnvDiff) -> list[dict]:
     out, i = [], 1
     for var, val in diff.new_vars.items():
-        out.append(_finding(f"PW-ENV-{i:03d}", "MEDIUM", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "MEDIUM", "runner-drift",
             f"New environment variable: {var}",
             f"'{var}' present now but absent at baseline.",
             "runner", f"{var}={val[:80]}")); i += 1
     for var in diff.removed_vars:
-        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner-drift",
             f"Environment variable removed: {var}", f"'{var}' absent now, present at baseline.",
             "runner")); i += 1
     for var, (old, new) in diff.changed_vars.items():
-        out.append(_finding(f"PW-ENV-{i:03d}", "MEDIUM", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "MEDIUM", "runner-drift",
             f"Environment variable changed: {var}",
             f"'{var}' changed — PATH changes can redirect tool execution.",
             "runner", f"baseline='{old[:60]}'  current='{new[:60]}'")); i += 1
     for tool in diff.new_tools:
-        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner-drift",
             f"New tool present: {tool}", f"'{tool}' installed now, absent at baseline.",
             "runner")); i += 1
     for tool in diff.removed_tools:
-        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner-drift",
             f"Tool removed: {tool}", f"'{tool}' absent now, present at baseline.",
             "runner")); i += 1
     for tool, (old, new) in diff.changed_tool_versions.items():
-        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner_environment",
+        out.append(_finding(f"PW-ENV-{i:03d}", "LOW", "runner-drift",
             f"Tool version changed: {tool}", f"'{tool}' changed version between runs.",
             "runner", f"baseline='{old}'  current='{new}'")); i += 1
     return out
@@ -1068,8 +1130,11 @@ def cmd_baseline(args):
 def cmd_scan(args):
     repo = _repo(args.repo)
     commit = load_baseline(repo, args.baseline)
-    findings = (_findings_from_diffs(diff_pipeline_files(repo, commit))
-                + _findings_from_steps(diff_fingerprints(repo, commit)))
+    diffs = diff_pipeline_files(repo, commit)
+    steps = diff_fingerprints(repo, commit)
+    explained = frozenset(c.path for c in steps)
+    findings = (_findings_from_steps(steps)
+                + _findings_from_diffs(diffs, explained))
     _emit(build_report(findings, repo, commit), args.json, args.verbose)
     sys.exit(1 if findings else 0)
 
@@ -1108,14 +1173,35 @@ def cmd_audit(args):
     """Full audit: scan + pin-audit + static analysis."""
     repo = _repo(args.repo)
     commit = load_baseline(repo, args.baseline)
-    findings = (
-        _findings_from_diffs(diff_pipeline_files(repo, commit))
-        + _findings_from_steps(diff_fingerprints(repo, commit))
-        + _findings_from_pinning(audit_pinning(repo))
-        + static_analysis(repo)
+
+    diffs = diff_pipeline_files(repo, commit)
+    steps = diff_fingerprints(repo, commit)
+    pinning = audit_pinning(repo)
+    static_findings = static_analysis(repo)
+
+    specific_findings = (
+        _findings_from_steps(steps)
+        + _findings_from_pinning(pinning)
+        + static_findings
     )
     if args.verify_shas:
-        findings += verify_pinned_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
+        specific_findings += verify_pinned_shas(repo, args.token or os.environ.get("GITHUB_TOKEN"))
+
+    # "files already explained" for the pipeline-file-change fallback:
+    # built from raw per-detector results, NOT from other findings'
+    # `location` text — the pinning finding's location is a grouped,
+    # truncated (max-5) comma-list and would silently under-count files
+    # 6+ if used here. static_findings' locations are reliably either a
+    # bare path or "path::job[::step[n]]", so splitting on "::" is safe
+    # for those specifically (this tool's own format, not a cross-tool
+    # parse of the opaque `location` field the shared schema warns against).
+    explained = frozenset(
+        {c.path for c in steps}
+        | {p.path for p in pinning}
+        | {f["location"].split("::", 1)[0] for f in static_findings}
+    )
+    findings = specific_findings + _findings_from_diffs(diffs, explained)
+
     _emit(build_report(findings, repo, commit), args.json, args.verbose)
     sys.exit(1 if findings else 0)
 
