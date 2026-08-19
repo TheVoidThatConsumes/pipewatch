@@ -78,7 +78,7 @@ controller's own current `categories.json` and `finding-envelope.schema.json`.
 - Section 5 (`gossamer audit` integration) not yet run end-to-end with a
   properly baselined fixture.
 - Section 6 (real-repo true/false positive) not yet run.
-- License field (`CC-BY-4.0` on the code itself) not yet resolved.
+- ~~License field (`CC-BY-4.0` on the code itself)~~ — **RESOLVED, see Addendum 5.**
 - Section 2 (exit-code/CLI contract) not yet run as its own explicit pass
   — some incidental coverage exists (the baseline-missing exit-code
   behavior above, the `--verify-shas` failure-mode work in Addendum 3),
@@ -357,3 +357,29 @@ Fresh git repo, no baseline: `audit --json .` → coverage-gap envelope,
 exit 1, schema-valid; human mode keeps the original error message and
 exit 1; `--baseline` override and post-`pipewatch baseline` runs
 unchanged; `pin-audit --json` / `static --json` now schema-valid.
+
+## Addendum 5 (Aug 19 2026) — relicense to Apache-2.0 (code) / CC BY 4.0 (docs)
+
+Resolves the Section 0 inventory flag and the open item on the license
+field: pipewatch's code was shipping under `CC-BY-4.0`, a docs license,
+not the suite's code standard (Apache 2.0). Confirmed with the project
+lead — it was carried over from the README's docs licensing, not a
+deliberate choice. The suite is now consistent:
+
+- **Code** (`pipewatch.py`, `pipewatch_verify.py`): Apache-2.0.
+  `pyproject.toml` declares `license = "Apache-2.0"` with
+  `license-files = ["LICENSE"]`; `LICENSE` carries the full Apache 2.0
+  text (byte-identical to the other suite members').
+- **Docs** (README, DECISIONS.md): CC BY 4.0, unchanged — that is the
+  docs license across the suite.
+- The relicense is retroactive: David Obi is the sole copyright holder,
+  so no third-party rights are affected. Published PyPI releases
+  0.2.0–0.6.0 keep their original metadata; any future release ships
+  under the corrected terms.
+
+### Verified
+
+`LICENSE` identical to vsac/tokenwatch's Apache 2.0 text; wheel built
+from a clean copy contains the LICENSE file and
+`License-Expression: Apache-2.0` in METADATA; README license section
+points at Apache 2.0.

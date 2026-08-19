@@ -287,4 +287,4 @@ Use `init-runner` to add runner environment monitoring alongside the audit step.
 
 ## License
 
-Copyright (c) 2026 David Obi. Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See [LICENSE](LICENSE).
+Copyright (c) 2026 David Obi. Licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). See [LICENSE](LICENSE).

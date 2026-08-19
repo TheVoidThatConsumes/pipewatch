@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipewatch-cli"
-version = "0.7.0"
+version = "0.7.1"
 description = "Integrity monitoring and static analysis for CI/CD pipelines"
 readme = {file = "README.md", content-type = "text/markdown"}
-license = "CC-BY-4.0"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 keywords = ["security", "ci-cd", "pipeline", "integrity", "static-analysis", "devops"]
 dependencies = ["pyyaml>=6.0"]
