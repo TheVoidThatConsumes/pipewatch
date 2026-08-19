@@ -29,7 +29,7 @@ Findings are severity-ranked (CRITICAL -> HIGH -> MEDIUM -> LOW -> INFO) and alw
 
 ## Installation
 
-Requires Python 3.10+. `pyyaml` is the only external dependency.
+Requires Python 3.12+. `pyyaml` is the only external dependency.
 
 **Via pip (recommended):**
 
@@ -191,7 +191,7 @@ All commands accept `--json`:
 {
   "schema_version": "1.0",
   "tool": "pipewatch",
-  "version": "0.7.1",
+  "version": "0.7.3",
   "timestamp": "2025-01-01T00:00:00+00:00",
   "repo": "/path/to/repo",
   "baseline_commit": "abc123...",

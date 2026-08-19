@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipewatch-cli"
-version = "0.7.1"
+version = "0.7.3"
 description = "Integrity monitoring and static analysis for CI/CD pipelines"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
