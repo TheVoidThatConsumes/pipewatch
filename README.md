@@ -189,8 +189,9 @@ All commands accept `--json`:
 
 ```
 {
+  "schema_version": "1.0",
   "tool": "pipewatch",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "timestamp": "2025-01-01T00:00:00+00:00",
   "repo": "/path/to/repo",
   "baseline_commit": "abc123...",
@@ -198,7 +199,7 @@ All commands accept `--json`:
     {
       "id": "PW-INJ-001",
       "severity": "HIGH",
-      "category": "script_injection",
+      "category": "script-injection",
       "title": "Script injection risk: .github/workflows/ci.yml::build::step[2]",
       "description": "A run: block interpolates a user-controlled context value...",
       "location": ".github/workflows/ci.yml::build::step[2]",
