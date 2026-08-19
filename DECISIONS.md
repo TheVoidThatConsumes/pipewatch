@@ -52,8 +52,8 @@ first" as a structured, actionable field). Whether that's worth fixing
 under `--json`, schema-conformant, with a category/severity that flags
 "no baseline configured" as its own condition) or left as legitimate
 tool-level error reporting is an open design question, not yet decided —
-noted here rather than fixed silently, per audit process. **Still open as
-of Addendum 3 — not yet revisited.**
+noted here rather than fixed silently, per audit process. **RESOLVED in
+Addendum 4 — the envelope option was chosen.**
 
 ## Section 1 — schema conformance: CLOSED (see Addenda 1 and 2)
 
@@ -311,3 +311,49 @@ session/project history until now. Flagging this explicitly as a process
 gap this consolidation closes, not something to let recur: future audit
 work on this tool should treat this file, at this path, as the ledger —
 not chat history, not a project-only document.
+---
+
+## Addendum 4 (Aug 19 2026) — baseline-missing path emits a coverage-gap envelope
+
+### Decision
+
+The open item above (Section 0 / open-item section) is resolved: the
+envelope option was chosen. Under `--json`, a missing baseline no longer
+exits via a bare stderr string — pipewatch emits a schema-conformant
+finding envelope and exits 1.
+
+The synthetic finding is a **coverage-gap** (registered controller
+category, `used_by: ["vsac", "pipewatch"]` — its locked description
+explicitly names "no baseline configured"):
+
+- `id: PW-GAP-001`, `severity: INFO` (schema-required placeholder),
+  `non_scored: true`, `location` = the repo path (the thing that was not
+  evaluated), description tells the CI consumer to run `pipewatch
+  baseline` and re-run.
+- `non_scored` makes the controller's `gate_passed()` fail closed —
+  an unevaluated repo can never pass the gate as "clean". This was the
+  original motivation for the DECISIONS.md non_scored rule (see
+  gossamer-suite DECISIONS.md); pipewatch now exercises it for real.
+
+### Scope guard
+
+Only the *missing* baseline takes this path. HMAC verification failures
+and plain-text-with-key refusals still exit loudly in both modes —
+tamper suspicion must never be demoted to a coverage-gap finding. The
+`--baseline <sha>` override path is unchanged.
+
+### Found-and-fixed along the way
+
+- `build_report(..., baseline=None)` emitted `"baseline_commit": null`,
+  which violates the envelope schema (`type: string`). This silently
+  broke `pin-audit --json` and `static --json` envelopes. `baseline_commit`
+  is now omitted when there is no baseline.
+- `__version__` was `"0.5.0"` while the distribution was `0.6.0`; the
+  envelope's `version` field now matches the distribution.
+
+### Verified
+
+Fresh git repo, no baseline: `audit --json .` → coverage-gap envelope,
+exit 1, schema-valid; human mode keeps the original error message and
+exit 1; `--baseline` override and post-`pipewatch baseline` runs
+unchanged; `pin-audit --json` / `static --json` now schema-valid.

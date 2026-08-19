@@ -32,7 +32,7 @@ from typing import Optional
 
 import yaml
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 _BASELINE_FILE = ".pipewatch_baseline"
 _SNAPSHOT_FILE = ".pipewatch_env_snapshot.json"
@@ -1009,14 +1009,20 @@ def build_report(findings: list[dict], repo: "str | Path", baseline: Optional[st
     counts = {s: 0 for s in _SEV_ORDER}
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
-    return {
+    report = {
         "schema_version": "1.0",
         "tool": "pipewatch", "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "repo": str(repo), "baseline_commit": baseline,
+        "repo": str(repo),
         "findings": sorted(findings, key=lambda x: _SEV_ORDER.get(x["severity"], 99)),
         "summary": {"total": len(findings), **counts},
     }
+    # baseline_commit is `type: string` in the envelope schema — it must be
+    # OMITTED when there is no baseline, not set to null. (pin-audit,
+    # static, and the coverage-gap path all have no baseline.)
+    if baseline:
+        report["baseline_commit"] = baseline
+    return report
 
 
 def print_report(report: dict, verbose: bool = False) -> None:
@@ -1057,6 +1063,42 @@ def _emit(report: dict, as_json: bool, verbose: bool) -> None:
     print(json.dumps(report, indent=2)) if as_json else print_report(report, verbose)
 
 
+def _coverage_gap_report(repo: Path) -> dict:
+    """Envelope for the never-evaluated repo: no baseline means nothing
+    was compared, so the run is a coverage-gap (non_scored, fail-closed
+    in the controller's gate), not a clean scan. `location` is the repo
+    path — the thing that was not evaluated."""
+    finding = _finding(
+        "PW-GAP-001", "INFO", "coverage-gap",
+        "No baseline configured — nothing was compared",
+        "Run `pipewatch baseline` to record HEAD as the known-good reference, "
+        "then re-run the audit.",
+        str(repo),
+    )
+    finding["non_scored"] = True
+    return build_report([finding], repo, None)
+
+
+def _resolve_baseline(repo: Path, override: Optional[str], as_json: bool) -> str:
+    """load_baseline(), with a schema-conformant way out of the
+    missing-baseline case (Addendum 4): a repo with no baseline has
+    never been evaluated, which is a coverage-gap finding, not a bare
+    stderr string — aggregate.py parses stdout as JSON and would
+    otherwise record pipewatch under `errors` with nothing actionable.
+
+    Only the *missing* baseline takes this path. HMAC failures and
+    plain-text-with-key refusals still exit loudly in both modes —
+    tamper suspicion must never be demoted to a coverage-gap finding.
+    """
+    if override or (repo / _BASELINE_FILE).exists():
+        return load_baseline(repo, override)
+    if as_json:
+        print("error: no baseline set. Run `pipewatch baseline` first.", file=sys.stderr)
+        _emit(_coverage_gap_report(repo), True, False)
+        sys.exit(1)
+    return load_baseline(repo, None)  # prints the human error, exits 1
+
+
 def cmd_baseline(args):
     repo = _repo(args.repo)
     commit = args.commit or git_head(repo)
@@ -1068,7 +1110,7 @@ def cmd_baseline(args):
 
 def cmd_scan(args):
     repo = _repo(args.repo)
-    commit = load_baseline(repo, args.baseline)
+    commit = _resolve_baseline(repo, args.baseline, args.json)
     diffs = diff_pipeline_files(repo, commit)
     steps = diff_fingerprints(repo, commit)
     explained = frozenset(c.path for c in steps)
@@ -1128,7 +1170,7 @@ def cmd_env_diff(args):
 def cmd_audit(args):
     """Full audit: scan + pin-audit + static analysis."""
     repo = _repo(args.repo)
-    commit = load_baseline(repo, args.baseline)
+    commit = _resolve_baseline(repo, args.baseline, args.json)
 
     diffs = diff_pipeline_files(repo, commit)
     steps = diff_fingerprints(repo, commit)
